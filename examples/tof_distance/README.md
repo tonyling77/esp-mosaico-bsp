@@ -1,35 +1,106 @@
+[English](README.md) | [简体中文](README_CN.md)
+
 # ToF Distance Example
 
-Uses one VL53L0X board and the current BSP to display a live ranging dashboard on the 480 × 480 screen. The application waits 100 ms after each measurement and also logs results over the serial console.
+Displays independent left/right distance readings and recognizes directional
+hand swipes on the ESP-Mosaico LCD. The default sensor is **VL53L4CDV0DH/1**
+(VL53L4CD); **VL53L0CXV0DH/1** (VL53L0X) is also supported. Firmware automatically
+selects the matching driver from the chip ID; supported models can be mixed.
 
-The interface uses a dark blue background with mint green accents: a large central distance reading, a 0–2 m arc gauge, a moving scale marker, and cards for return signal and ambient light levels (MCPS). Invalid measurements clear the previous distance, hide the target marker, and show the status code. Initialization or communication failures leave a visible error message. English labels avoid the need for a large Chinese font.
+## Hardware
 
-Display initialization, brightness, LVGL locking, power, and slot mapping use the current BSP APIs. The BSP selects the configuration for the hardware revision; the example does not duplicate revision-specific GPIO definitions. Supported revisions follow the BSP: v1.0 and v1.2, with v1.1 using the v1.2 mapping. Touch is disabled.
+- ESP-Mosaico / ESP32-S31 with PSRAM and an ESP-IDF 6.2 or newer environment.
+- One or two ToF boards with valid EEPROM descriptors (type `0x10`). If needed,
+  use [module_eeprom_programmer](../module_eeprom_programmer) to program them.
+- One board is sufficient for ranging; directional gestures require both slots.
 
-## Hardware and Usage
+Both sensors have factory address `0x29`. The example assigns independent
+addresses automatically:
 
-- ESP-Mosaico / ESP32-S31 with ESP-IDF 6.2 or newer.
-- One ToF board in either slot, with a valid ToF EEPROM descriptor (type `0x10`). Use the `module_eeprom_programmer` example to program the descriptor if needed.
-- Connect only one ToF board to avoid an address conflict at `0x29` on the shared bus.
+| Slot | XSHUT | Sensor address (7-bit) |
+|---|---|---|
+| Left | GPIO48 | `0x30` |
+| Right | GPIO47 | `0x31` |
 
-After activating the ESP-IDF environment:
+Both slots are reserved for ToF boards while this example runs, because it
+controls their XSHUT pins. Do not connect other module types in these slots.
 
-```bash
+## Build and Flash
+
+Activate the ESP-IDF environment, then run from the repository root:
+
+```sh
 cd examples/tof_distance
 idf.py build
 idf.py -p PORT flash monitor
 ```
 
-The module manager runs continuously. The application waits for a valid ToF descriptor in either slot, claims the slot, initializes the sensor, and displays the active slot above the gauge. No module at boot is a normal waiting state.
+Replace `PORT` with the board's serial port.
 
-Removing the board or encountering a measurement communication error clears the displayed values, destroys the sensor handle, resets the mapped XSHUT GPIO, and releases the slot. The application then resumes discovery automatically. Reinsert the board into either slot to resume measurements without resetting the mainboard. Initialization failures are retried with a one-second delay. Cleanup failures retain ownership and are retried before another sensor is opened.
+## Usage
 
-Invalid range results do not indicate removal: the screen shows the range status while measurement continues. Valid distances are also logged as `distance=... mm`. Slot presence is checked through the module manager before and after each blocking measurement. Its normal EEPROM debounce remains active while the slot is claimed.
+The two cards show each slot's sensor model, address, distance in millimeters,
+status, signal/ambient count rates (MCPS), and range bar. Invalid readings show
+`--`; an empty field shows `NO TARGET`. The range bar covers 0–2000 mm; valid
+readings beyond that scale still display their numeric value. Touch is disabled.
 
-This supports moving one ToF board between the two slots, not simultaneous operation of two boards sharing address `0x29`.
+For gestures:
 
-## Validation Scope
+1. Connect both sensors and clear the sensing area. Wait for
+   `READY - WAVE LEFT OR RIGHT`. An empty field with both cards showing `--`
+   can still become ready; a measurable background is not required.
+2. Move a hand within 30 cm across the left sensor, then the right, and clear
+   both fields: `SWIPE RIGHT` and the light bar indicate a rightward swipe.
+   Reverse the order for `SWIPE LEFT`.
+3. Wait for the detector to rearm before the next swipe. Direction follows the
+   mainboard's left/right slots.
 
-The serial version was tested with the left slot of the v1.1 mainboard connected through ACM1. The display version was built and flashed to the same board, and logs confirmed successful display, LVGL, and ToF initialization. During observation, measurements consistently returned invalid target status `4`, with no crashes. The rendered interface has not been visually verified from a screen capture or photo. Other mainboard revisions, the right slot, and removal behavior still require separate hardware validation.
+| Message | Meaning |
+|---|---|
+| `WAIT FOR TWO SENSORS` | A sensor is missing or its data is unavailable |
+| `HOLD STILL / CLEAR SENSORS` | Clear the sensing area or keep the background stable |
+| `READY - WAVE LEFT OR RIGHT` | Ready for a gesture |
+| `SWIPE RIGHT` / `SWIPE LEFT` | Last recognized gesture |
 
-The hot-plug lifecycle passed an ESP32-S31 build and host fault-injection checks covering discovery in both slots, removal during a read, initialization and communication failures, cleanup retries, and continued sampling after invalid ranges. The updated firmware was flashed to ACM1. Hardware logs confirmed right-slot discovery, valid measurements, and successful lease release after communication loss followed by an absent-slot event. A complete unplug/replug cycle in each slot still requires a continuous hardware capture.
+Both models use continuous ranging with a 20 ms measurement budget. Sampling
+rate depends on the sensor and bus conditions. Disconnection or a communication
+failure clears the affected card; reconnection is handled automatically.
+
+## Configuration
+
+Run `idf.py menuconfig` and open **ToF Distance Demo**:
+
+| Setting | Default |
+|---|---|
+| `CONFIG_TOF_GESTURE_NEAR_MM` — hand detection distance | 300 mm |
+| `CONFIG_TOF_GESTURE_THRESHOLD_MM` — distance change for background-based gestures | 60 mm |
+| `CONFIG_TOF_GESTURE_WINDOW_MS` — gesture completion window | 1500 ms |
+| `CONFIG_TOF_GESTURE_DIAGNOSTICS` — sampling diagnostics every five seconds | Off |
+
+Lower thresholds increase sensitivity and may increase false triggers. Keep
+nearby objects outside the hand detection zone.
+
+### Distance Offset
+
+Offsets are configured independently for each model and slot in the same menu:
+
+| Model | Left slot | Right slot | Default |
+|---|---|---|---|
+| VL53L4CD | `CONFIG_TOF_L4CD_LEFT_OFFSET_ADJUST_MM` | `CONFIG_TOF_L4CD_RIGHT_OFFSET_ADJUST_MM` | 0 mm |
+| VL53L0X | `CONFIG_TOF_DISTANCE_OFFSET_ADJUST_MM` | `CONFIG_TOF_DISTANCE_RIGHT_OFFSET_ADJUST_MM` | −37 mm |
+
+The VL53L0X default is specific to the original board. Check each sensor at known
+distances before applying compensation; use 0 for no additional adjustment.
+Negative offsets reduce the measured distance. Compensation affects both the
+display and logs and is stored in firmware configuration.
+
+## Logs and References
+
+Startup logs list responding I²C addresses. ToF sensors are held in shutdown
+during this scan and appear later at their assigned addresses. Valid distances
+are logged at most once per second per slot; this is not the sampling rate.
+Enable sampling diagnostics to investigate missed gestures.
+
+- [ToF component API and driver documentation](../../components/mosaico_module_tof/README.md)
+- [VL53L4CD datasheet](https://www.st.com/resource/en/datasheet/vl53l4cd.pdf)
+- [VL53L0X datasheet](https://www.st.com/resource/en/datasheet/vl53l0x.pdf)
